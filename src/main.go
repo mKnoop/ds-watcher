@@ -1,38 +1,89 @@
-@@ -1,11 +1,37 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
+	"io"
 	"log"
-	"github.com/sevlyar/go-daemon"
+	"os"
+	"os/signal"
+	"syscall"
+	"time"
 )
 
-func startDaemon(workDir string) {
-	fmt.Printf("Start ds-watcher daemon with work dir %s\n", workDir)
+const defaultTick = 60 * time.Second
 
-	cntxt := &daemon.Context{
-		PidFileName: "ds-watcher.pid",
-		PidFilePerm: 0644,
-		LogFileName: "ds_watcher.log",
-		LogFilePerm: 0640,
-		WorkDir:     workDir,
-		Umask:       027,
-	}
+type config struct {
+	statusCode int
+	tick       time.Duration
+	urls       string
+}
 
-	d, err := cntxt.Reborn()
-	if err != nil {
-		log.Fatal("Unable to run: ", err)
-	}
-	if d != nil {
-		return
-	}
+func (c *config) init(args []string) error {
+	var (
+		statusCode = flag.Int("status", 200, "Response HTTP status code")
+		tick       = flag.Duration("tick", defaultTick, "Ticking interval")
+		urls       = flag.String("urls", "", "Request URLs")
+	)
+
+	flag.Parse()
+
+	c.statusCode = *statusCode
+	c.tick = *tick
+	c.urls = *urls
+
+	return nil
 }
 
 func main() {
-	workDir := flag.String("workDir", "./", "The working dir for the docker stack")
-	flag.Parse()
+	ctx := context.Background()
+	ctx, cancel := context.WithCancel(ctx)
 
+	signalChan := make(chan os.Signal, 1)
+	signal.Notify(signalChan, os.Interrupt, syscall.SIGHUP)
+
+	c := &config{}
+
+	defer func() {
+		signal.Stop(signalChan)
+		cancel()
+	}()
+
+	go func() {
+		for {
+			select {
+			case s := <-signalChan:
+				switch s {
+				case syscall.SIGHUP:
+					c.init(os.Args)
+				case os.Interrupt:
+					cancel()
+					os.Exit(1)
+				}
+			case <-ctx.Done():
+				log.Printf("Done.")
+				os.Exit(1)
+			}
+		}
+	}()
+
+	if err := run(ctx, c, os.Stdout); err != nil {
+		fmt.Fprintf(os.Stderr, "%s\n", err)
+		os.Exit(1)
+	}
 }
-	startDaemon(*workDir)
+
+func run(ctx context.Context, c *config, stdout io.Writer) error {
+	c.init(os.Args)
+	log.SetOutput(os.Stdout)
+
+	for {
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-time.Tick(c.tick):
+			fmt.Printf("Check urls")
+		}
+	}
 }
